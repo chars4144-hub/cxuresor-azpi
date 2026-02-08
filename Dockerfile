@@ -12,6 +12,11 @@ ARG BUILD_COMPAT
 
 WORKDIR /build
 
+
+
+
+
+
 # 安装构建依赖及 Rust musl 工具链
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc nodejs npm lld musl-tools && \

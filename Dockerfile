@@ -12,27 +12,21 @@ ARG BUILD_COMPAT
 
 WORKDIR /build
 
-
-
-
-
-
-# 安装构建依赖及 Rust musl 工具链
+# 安装构建依赖
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc nodejs npm lld musl-tools && \
+    apt-get install -y --no-install-recommends gcc nodejs npm lld musl-tools wget ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
     case "$TARGETARCH" in \
         amd64) rustup target add x86_64-unknown-linux-musl ;; \
         arm64) rustup target add aarch64-unknown-linux-musl ;; \
-        *) echo "Unsupported architecture for rustup: $TARGETARCH" && exit 1 ;; \
+        *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
     esac
 
-# 这一步会把你刚才添加的 frontend.zip 一起复制到 /build 目录下
+# 复制仓库所有文件
 COPY . .
 
-# 根据构建选项，设置编译参数并构建项目
+# 执行编译
 RUN \
-    # 根据架构设置编译目标和优化的 CPU 型号
     case "$TARGETARCH" in \
         amd64) \
             TARGET_TRIPLE="x86_64-unknown-linux-musl"; \
@@ -40,16 +34,13 @@ RUN \
         arm64) \
             TARGET_TRIPLE="aarch64-unknown-linux-musl"; \
             TARGET_CPU="neoverse-n1" ;; \
-        *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
     esac && \
     \
-    # 组合 cargo features
     FEATURES="" && \
     if [ "$BUILD_PREVIEW" = "true" ]; then FEATURES="$FEATURES __preview_locked"; fi && \
     if [ "$BUILD_COMPAT" = "true" ]; then FEATURES="$FEATURES __compat"; fi && \
     FEATURES=$(echo "$FEATURES" | xargs) && \
     \
-    # 准备 RUSTFLAGS
     RUSTFLAGS_BASE="-C link-arg=-s -C link-arg=-fuse-ld=lld -C target-feature=+crt-static -A unused" && \
     if [ "$BUILD_COMPAT" = "true" ]; then \
         export RUSTFLAGS="$RUSTFLAGS_BASE"; \
@@ -57,34 +48,44 @@ RUN \
         export RUSTFLAGS="$RUSTFLAGS_BASE -C target-cpu=$TARGET_CPU"; \
     fi && \
     \
-    # 执行构建
     if [ -n "$FEATURES" ]; then \
         cargo build --bin cursor-api --release --target=$TARGET_TRIPLE --features "$FEATURES"; \
     else \
         cargo build --bin cursor-api --release --target=$TARGET_TRIPLE; \
     fi && \
     \
-    # 准备交付物
-    mkdir -p /app && \
-    cp target/$TARGET_TRIPLE/release/cursor-api /app/ && \
-    # 【关键修改】将你上传的 frontend.zip 复制到待交付目录 /app 中
-    if [ -f "frontend.zip" ]; then cp frontend.zip /app/; fi
+    # --- 关键：准备交付文件夹 ---
+    mkdir -p /app_out && \
+    cp target/$TARGET_TRIPLE/release/cursor-api /app_out/ && \
+    # 强制将 frontend.zip 移入交付目录
+    if [ -f "frontend.zip" ]; then \
+        cp frontend.zip /app_out/; \
+    else \
+        echo "Warning: frontend.zip not found in build context, attempting to download..."; \
+        wget -O /app_out/frontend.zip https://github.com/wisdgod/cursor-api/releases/download/v0.4.0-pre.21/frontend.zip; \
+    fi && \
+    # 如果有 .env 也带走
+    if [ -f ".env" ]; then cp .env /app_out/; fi
 
 # ==================== 运行阶段 ====================
+# 使用 scratch 追求极致体积
 FROM scratch
 
-# 从构建阶段复制整个 /app 目录（现在里面包含 cursor-api 和 frontend.zip 了）
-COPY --chown=1001:1001 --chmod=0700 --from=builder /app /app
-
+# 设置工作目录
 WORKDIR /app
 
-# 如果你本地有 .env 文件并想一起打包，可以取消下面这行的注释
-# COPY --chown=1001:1001 .env /app/.env
+# 从 builder 阶段的 /app_out 复制所有内容到当前目录 (.)
+# 这确保了 cursor-api 和 frontend.zip 在同一层级
+COPY --chown=1001:1001 --chmod=0700 --from=builder /app_out/ .
 
+# 环境变量设置
 ENV PORT=3000
+ENV FRONTEND_PATH=frontend.zip
+
 EXPOSE ${PORT}
 
 # 使用非 root 用户运行
 USER 1001
 
-ENTRYPOINT ["/app/cursor-api"]
+# 启动命令：直接执行当前目录下的二进制
+ENTRYPOINT ["./cursor-api"]

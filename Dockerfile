@@ -22,6 +22,7 @@ RUN apt-get update && \
         *) echo "Unsupported architecture for rustup: $TARGETARCH" && exit 1 ;; \
     esac
 
+# 这一步会把你刚才添加的 frontend.zip 一起复制到 /build 目录下
 COPY . .
 
 # 根据构建选项，设置编译参数并构建项目
@@ -43,7 +44,7 @@ RUN \
     if [ "$BUILD_COMPAT" = "true" ]; then FEATURES="$FEATURES __compat"; fi && \
     FEATURES=$(echo "$FEATURES" | xargs) && \
     \
-    # 准备 RUSTFLAGS，兼容模式下移除特定 CPU 优化以获得更好的兼容性
+    # 准备 RUSTFLAGS
     RUSTFLAGS_BASE="-C link-arg=-s -C link-arg=-fuse-ld=lld -C target-feature=+crt-static -A unused" && \
     if [ "$BUILD_COMPAT" = "true" ]; then \
         export RUSTFLAGS="$RUSTFLAGS_BASE"; \
@@ -52,31 +53,33 @@ RUN \
     fi && \
     \
     # 执行构建
-    # -C link-arg=-s: 移除符号表以减小体积
-    # -C target-feature=+crt-static: 静态链接 C 运行时
-    # -C target-cpu: 针对特定 CPU 优化
-    # -A unused: 允许未使用的代码
     if [ -n "$FEATURES" ]; then \
         cargo build --bin cursor-api --release --target=$TARGET_TRIPLE --features "$FEATURES"; \
     else \
         cargo build --bin cursor-api --release --target=$TARGET_TRIPLE; \
     fi && \
     \
+    # 准备交付物
     mkdir -p /app && \
-    cp target/$TARGET_TRIPLE/release/cursor-api /app/
+    cp target/$TARGET_TRIPLE/release/cursor-api /app/ && \
+    # 【关键修改】将你上传的 frontend.zip 复制到待交付目录 /app 中
+    if [ -f "frontend.zip" ]; then cp frontend.zip /app/; fi
 
 # ==================== 运行阶段 ====================
 FROM scratch
 
-# 从构建阶段复制二进制文件，并设置为非 root 用户所有
+# 从构建阶段复制整个 /app 目录（现在里面包含 cursor-api 和 frontend.zip 了）
 COPY --chown=1001:1001 --chmod=0700 --from=builder /app /app
 
 WORKDIR /app
 
+# 如果你本地有 .env 文件并想一起打包，可以取消下面这行的注释
+# COPY --chown=1001:1001 .env /app/.env
+
 ENV PORT=3000
 EXPOSE ${PORT}
 
-# 使用非 root 用户运行，增强安全性
+# 使用非 root 用户运行
 USER 1001
 
 ENTRYPOINT ["/app/cursor-api"]
